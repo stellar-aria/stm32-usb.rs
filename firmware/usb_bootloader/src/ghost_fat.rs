@@ -508,7 +508,7 @@ impl<F: Flash> GhostFat<F> {
 
 
         unsafe {
-            let nvic = &(*NVIC::ptr());
+            let nvic = &(*NVIC::PTR);
 
             // Disable all interrupts
             for v in nvic.icer.iter() {
@@ -524,7 +524,7 @@ impl<F: Flash> GhostFat<F> {
 
             let vt = &*(base_addr as *const VectorTableStub);
 
-            let sbc = &(*SCB::ptr());
+            let sbc = &(*SCB::PTR);
 
             info!("VectorTableStub: {:X?}, vtor: {:X?}", vt, sbc.vtor.read());
 

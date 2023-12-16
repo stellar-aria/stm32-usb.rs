@@ -14,8 +14,8 @@ use stm32f1xx_hal::prelude::*;
 
 use embedded_hal::digital::v2::OutputPin;
 
-#[rtfm::app(device = stm32f1xx_hal::stm32, peripherals = true)]
-const APP: () = {    
+#[rtic::app(device = stm32f1xx_hal::stm32, peripherals = true)]
+mod app {    
     #[init]
     fn init(cx: init::Context) {
         let device = cx.device;
@@ -35,7 +35,7 @@ const APP: () = {
             for _ in 0..100000 { asm::nop() }
         }
     }
-};
+}
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {

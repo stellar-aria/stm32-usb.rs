@@ -6,69 +6,61 @@
 #![allow(unused_imports)]
 
 use core::{
-    panic::PanicInfo,
-    sync::atomic::{self, Ordering},
-    str::from_utf8_unchecked,
-    ptr::{
-        read_volatile,
-        write_volatile,
-    },
     convert::TryFrom,
     mem,
     ops::RangeInclusive,
+    panic::PanicInfo,
+    ptr::{read_volatile, write_volatile},
+    str::from_utf8_unchecked,
+    sync::atomic::{self, Ordering},
 };
-use cortex_m::{
-    interrupt,
-    asm::*,
-};    
-use embedded_hal::digital::v2::OutputPin;
-use rtfm::app;
-use stm32f1xx_hal::{
-    prelude::*,
-    time::Hertz,
-};
-use stm32f1xx_hal::{
-    usb::{
-        Peripheral, 
-        UsbBus, 
-        UsbBusType,
-    },
-    pac::FLASH,
-};
-use usb_device::{
-    bus,
-    device::{ 
-        UsbDevice, 
-        UsbDeviceBuilder, 
-        UsbVidPid,
-    },
-    UsbError,
-};
-use usbd_serial::{CdcAcmClass, SerialPort, USB_CLASS_CDC};
-use itm_logger::*;
-use usb_bootloader::hardware_extra::*;
+use cortex_m::interrupt;
+use rtic::app;
 
-// VID and PID are from dapboot bluepill bootloader
-const USB_VID: u16 = 0x1209; 
-const USB_PID: u16 = 0xDB42;
-const USB_CLASS_MISCELLANEOUS: u8 =  0xEF;
-
-#[cfg(feature = "itm")] 
+#[cfg(feature = "itm")]
 use cortex_m::{iprintln, peripheral::ITM};
 
+
 #[app(device = stm32f1xx_hal::stm32, peripherals = true)]
-const APP: () = {
-    struct Resources {
+mod app {
+    use cortex_m::{asm::*, interrupt};
+    use embedded_hal::digital::v2::OutputPin;
+    use itm_logger::*;
+
+    use stm32f1xx_hal::{
+        pac::FLASH,
+        usb::{Peripheral, UsbBus, UsbBusType},
+    };
+    use stm32f1xx_hal::{prelude::*, time::Hertz};
+    use usb_bootloader::hardware_extra::*;
+
+    // VID and PID are from dapboot bluepill bootloader
+    const USB_VID: u16 = 0x1209;
+    const USB_PID: u16 = 0xDB42;
+    const USB_CLASS_MISCELLANEOUS: u8 = 0xEF;
+
+    use itm_logger::*;
+    use usb_device::{
+        bus,
+        device::{UsbDevice, UsbDeviceBuilder, UsbVidPid},
+        UsbError,
+    };
+    use usbd_serial::{CdcAcmClass, SerialPort, USB_CLASS_CDC};
+    #[shared]
+    struct Shared {
         usb_dev: UsbDevice<'static, UsbBusType>,
         serial: SerialPort<'static, UsbBusType>,
     }
 
+    #[local]
+    struct Local {}
+
     #[init]
-    fn init(cx: init::Context) -> init::LateResources {
+    fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         static mut USB_BUS: Option<bus::UsbBusAllocator<UsbBusType>> = None;
 
         #[cfg(feature = "itm")]
-        {        
+        {
             update_tpiu_baudrate(8_000_000, ITM_BAUD_RATE).expect("Failed to reset TPIU baudrate");
             logger_init();
         }
@@ -96,8 +88,7 @@ const APP: () = {
         let flash_kib = FlashSize::get().kibi_bytes();
         info!("Flash: {} KiB", flash_kib);
 
-        
-        let mut gpioa = cx.device.GPIOA.split(&mut rcc.apb2);
+        let mut gpioa = cx.device.GPIOA.split();
 
         // BluePill board has a pull-up resistor on the D+ line.
         // Pull the D+ pin down to send a RESET condition to the USB bus.
@@ -116,60 +107,61 @@ const APP: () = {
             pin_dp: usb_dp,
         };
 
-        *USB_BUS = Some(UsbBus::new(usb));
+        unsafe { *USB_BUS = Some(UsbBus::new(usb)) };
 
-        let serial = SerialPort::new(USB_BUS.as_ref().unwrap());
-        
+        let serial = SerialPort::new(unsafe { USB_BUS.as_ref().unwrap() });
+
         let serial_number = get_serial_number();
         info!("Serial number: {}", serial_number);
 
-        let usb_dev = UsbDeviceBuilder::new(USB_BUS.as_ref().unwrap(), UsbVidPid(USB_VID, USB_PID))
-            .manufacturer("Fake company")
-            .product("Serial port")
-            .serial_number(serial_number)
-            .self_powered(true)
-            .device_class(USB_CLASS_CDC)
-            .build();
+        let usb_dev = UsbDeviceBuilder::new(
+            unsafe { USB_BUS.as_ref().unwrap() },
+            UsbVidPid(USB_VID, USB_PID),
+        )
+        .manufacturer("Fake company")
+        .product("Serial port")
+        .serial_number(serial_number)
+        .self_powered(true)
+        .device_class(USB_CLASS_CDC)
+        .build();
 
-        init::LateResources { usb_dev, serial }
+        (Shared { usb_dev, serial }, Local {}, init::Monotonics())
     }
 
-    #[task(binds = USB_HP_CAN_TX, resources = [usb_dev, serial])]
+
+    fn usb_poll<B: bus::UsbBus>(
+        usb_dev: &mut UsbDevice<'static, B>,
+        serial: &mut SerialPort<'static, B>,
+    ) {
+        if !usb_dev.poll(&mut [serial]) {
+            return;
+        }
+    
+        let mut buf = [0; 64];
+    
+        match serial.read(&mut buf) {
+            Ok(count) => {
+                let _ = serial.write(&buf[..count]);
+            }
+            Err(UsbError::WouldBlock) => {}
+            Err(e) => info!("Err: {:?}", e),
+        }
+    }
+
+    #[task(binds = USB_HP_CAN_TX, shared = [usb_dev, serial])]
     fn usb_tx(mut cx: usb_tx::Context) {
         usb_poll(&mut cx.resources.usb_dev, &mut cx.resources.serial);
     }
 
-    #[task(binds = USB_LP_CAN_RX0, resources = [usb_dev, serial])]
+    #[task(binds = USB_LP_CAN_RX0, shared = [usb_dev, serial])]
     fn usb_rx0(mut cx: usb_rx0::Context) {
         usb_poll(&mut cx.resources.usb_dev, &mut cx.resources.serial);
-    }
-};
-
-fn usb_poll<B: bus::UsbBus>(
-    usb_dev: &mut UsbDevice<'static, B>,
-    serial: &mut SerialPort<'static, B>,
-) {
-    if !usb_dev.poll(&mut [serial]) {
-        return;
-    }
-
-    let mut buf = [0; 64];
-
-    match serial.read(&mut buf) {
-        Ok(count) => {
-            let _ = serial.write(&buf[..count]); 
-        },
-        Err(UsbError::WouldBlock) => {},
-        Err(e) => info!("Err: {:?}", e),
     }
 }
 
 
 #[panic_handler]
-fn panic(
-    #[cfg_attr(not(feature = "itm"), allow(unused_variables))]
-    info: &PanicInfo
-) -> ! {
+fn panic(#[cfg_attr(not(feature = "itm"), allow(unused_variables))] info: &PanicInfo) -> ! {
     interrupt::disable();
 
     #[cfg(feature = "itm")]

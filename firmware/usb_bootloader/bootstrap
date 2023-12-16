@@ -15,7 +15,7 @@ rustup self update
 
 # Add the embedded toolchains
 rustup target add --toolchain stable thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi thumbv7em-none-eabihf
-rustup target add --toolchain nightly thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi thumbv7em-none-eabihf
+#rustup target add --toolchain nightly thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi thumbv7em-none-eabihf
 
 # Install cargo-binutils if it's not already installed. (Possibly not needed but listed in embedded book)
 if ! cargo nm -V >/dev/null 2>&1; then
@@ -33,9 +33,9 @@ fi
 
 # Install llvm-tools-preview
 rustup component add --toolchain stable llvm-tools-preview
-rustup component add --toolchain nightly llvm-tools-preview
+#rustup component add --toolchain nightly llvm-tools-preview
 
 # Run the initial build(s) which take quite a while the first time
-cargo +nightly check
-cargo +nightly build
-cargo +nightly doc
+cargo check
+cargo build
+cargo doc

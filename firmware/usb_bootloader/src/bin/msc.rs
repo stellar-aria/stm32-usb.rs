@@ -3,74 +3,21 @@
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(dead_code)]
-#![allow(unused_imports)]
 
 use core::{
-    panic::PanicInfo,
-    sync::atomic::{self, Ordering},
-    str::from_utf8_unchecked,
-    ptr::{
-        read_volatile,
-        write_volatile,
-    },
-    convert::TryFrom,
-    mem,
     ops::RangeInclusive,
+    panic::PanicInfo,
+    ptr::{read_volatile, write_volatile},
+    sync::atomic::{self, Ordering},
 };
-use cortex_m::{
-    interrupt,
-    asm::*,
-};    
-use embedded_hal::digital::v2::OutputPin;
-use rtfm::app;
-use stm32f1xx_hal::{
-    prelude::*,
-    time::Hertz,
-    usb::{
-        Peripheral, 
-        UsbBus, 
-        UsbBusType,
-    },
-    timer::{
-        CountDownTimer,
-        Timer,
-        Event,
-    },
-    pac::{
-        FLASH,
-        TIM2,
-    },
-};
-use usb_device::{
-    bus,
-    device::{ 
-        UsbDevice, 
-        UsbDeviceBuilder, 
-        UsbVidPid,
-    },
-};
+use cortex_m::interrupt;
+use stm32f1xx_hal::pac::FLASH;
+
 //use usb_device::prelude::*;
-use usbd_serial::{CdcAcmClass, SerialPort, USB_CLASS_CDC};
-use usbd_mass_storage::USB_CLASS_MSC;
-use usbd_scsi::{
-    Scsi,
-    BlockDevice,
-    BlockDeviceError,
-};
 use itm_logger::*;
-use usb_bootloader::{
-    hardware_extra::*,
-    ghost_fat::GhostFat,
-    flash::Flash,
-};
+use usb_bootloader::flash::Flash;
 
-// VID and PID are from dapboot bluepill bootloader
-const USB_VID: u16 = 0x1209; 
-const USB_PID: u16 = 0xDB42;
-//const USB_CLASS_MISCELLANEOUS: u8 =  0xEF;
-
-const TICK_MS: u32 = 10;
-const TICK_HZ: Hertz = Hertz(1000 / TICK_MS);
+use usbd_scsi::BlockDeviceError;
 
 pub struct FlashWrapper {
     page_size: u32,
@@ -103,9 +50,7 @@ impl Flash for FlashWrapper {
         const KEY1: u32 = 0x45670123;
         const KEY2: u32 = 0xCDEF89AB;
 
-        let flash = unsafe {
-            &(*FLASH::ptr())
-        };
+        let flash = unsafe { &(*FLASH::ptr()) };
 
         if flash.cr.read().lock().bit_is_set() {
             // Unlock flash
@@ -123,9 +68,7 @@ impl Flash for FlashWrapper {
 
     // Lock the flash to prevent erasing/writing
     fn lock_flash(&mut self) -> Result<(), BlockDeviceError> {
-        let flash = unsafe {
-            &(*FLASH::ptr())
-        };
+        let flash = unsafe { &(*FLASH::ptr()) };
 
         flash.cr.modify(|_, w| w.lock().set_bit());
 
@@ -134,15 +77,13 @@ impl Flash for FlashWrapper {
 
     // Is the flash busy?
     fn is_operation_pending(&self) -> bool {
-        let flash = unsafe {
-            &(*FLASH::ptr())
-        };
+        let flash = unsafe { &(*FLASH::ptr()) };
         flash.sr.read().bsy().bit_is_set()
     }
 
     // Check if the page is empty
     fn is_page_erased(&mut self, page_address: u32) -> bool {
-        for word in (page_address..(page_address+self.page_size())).step_by(4) {
+        for word in (page_address..(page_address + self.page_size())).step_by(4) {
             let value = unsafe { read_volatile(word as *const u32) };
             if value != 0xFFFFFFFF {
                 return false;
@@ -153,9 +94,7 @@ impl Flash for FlashWrapper {
 
     // Erase the page at the given address. Don't check if erase is necessary, that's done at a higher level
     fn erase_page(&mut self, page_address: u32) -> Result<(), BlockDeviceError> {
-        let flash = unsafe {
-            &(*FLASH::ptr())
-        };
+        let flash = unsafe { &(*FLASH::ptr()) };
 
         // Make sure the flash is unlocked
         self.unlock_flash()?;
@@ -180,9 +119,8 @@ impl Flash for FlashWrapper {
             error!("Page erase failed");
             Err(BlockDeviceError::EraseError)?;
         }
-            
-        info!("erased 0x{:X?}", page_address);  
-        
+
+        info!("erased 0x{:X?}", page_address);
 
         Ok(())
     }
@@ -221,9 +159,7 @@ impl Flash for FlashWrapper {
     }
 
     fn write_page(&mut self) -> Result<(), BlockDeviceError> {
-        let flash = unsafe {
-            &(*FLASH::ptr())
-        };
+        let flash = unsafe { &(*FLASH::ptr()) };
 
         let page_address = self.current_page.ok_or(BlockDeviceError::InvalidAddress)?;
 
@@ -236,7 +172,7 @@ impl Flash for FlashWrapper {
         let mut half_word = [0; 2];
         for (i, c) in buffer.chunks_exact(2).enumerate() {
             let hw_addr = page_address + i as u32 * 2;
-            
+
             if !range.contains(&hw_addr) {
                 Err(BlockDeviceError::InvalidAddress)?;
             }
@@ -247,29 +183,30 @@ impl Flash for FlashWrapper {
 
             let old_value = unsafe { read_volatile(hw_addr as *const [u8; 2]) };
             if old_value != half_word {
-                info!("0x{:X?}: 0x{:X?} => 0x{:X?}", hw_addr, old_value, half_word); 
+                info!("0x{:X?}: 0x{:X?} => 0x{:X?}", hw_addr, old_value, half_word);
 
                 // Indicate we want to write to flash
                 flash.cr.modify(|_, w| w.pg().set_bit());
 
                 // Write the half word
-                unsafe { write_volatile(hw_addr as *mut [u8; 2], half_word); }
+                unsafe {
+                    write_volatile(hw_addr as *mut [u8; 2], half_word);
+                }
 
                 // Wait for write to complete
                 while flash.sr.read().bsy().bit_is_set() {}
 
                 // Clear write flag
-                flash.cr.modify(|_, w| w.pg().clear_bit());  
+                flash.cr.modify(|_, w| w.pg().clear_bit());
 
                 let new_value = unsafe { read_volatile(hw_addr as *const [u8; 2]) };
 
                 if new_value != half_word {
-                    error!("write to 0x{:X?} failed", hw_addr);  
+                    error!("write to 0x{:X?} failed", hw_addr);
                     Err(BlockDeviceError::WriteError)?;
                 }
 
-                info!("write to 0x{:X?} ok", hw_addr);  
-
+                info!("write to 0x{:X?} ok", hw_addr);
             }
         }
 
@@ -295,11 +232,21 @@ impl Flash for FlashWrapper {
             if old_value & new_value == new_value {
                 // New value can be written over old value without erase
                 write_needed = true;
-                trace!("Write needed: 0x{:X}, 0x{:X} => 0x{:X}", hw_addr, old_value, new_value);
+                trace!(
+                    "Write needed: 0x{:X}, 0x{:X} => 0x{:X}",
+                    hw_addr,
+                    old_value,
+                    new_value
+                );
                 continue;
-            } 
+            }
 
-            trace!("Erase page: 0x{:X}, 0x{:X} => 0x{:X}", hw_addr, old_value, new_value);
+            trace!(
+                "Erase page: 0x{:X}, 0x{:X} => 0x{:X}",
+                hw_addr,
+                old_value,
+                new_value
+            );
             // Erase is required
             erase_needed = true;
             break;
@@ -316,11 +263,11 @@ impl Flash for FlashWrapper {
 
             /*
             for c in self.page_buffer().chunks(16) {
-                trace!("0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}", 
+                trace!("0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}, 0x{:02X?}",
                     c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
                     c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15],
                 );
-            } 
+            }
             */
         }
 
@@ -328,19 +275,51 @@ impl Flash for FlashWrapper {
     }
 }
 
-#[cfg(feature = "itm")] 
+#[cfg(feature = "itm")]
 use cortex_m::{iprintln, peripheral::ITM};
 
 #[app(device = stm32f1xx_hal::stm32, peripherals = true)]
-const APP: () = {
-    struct Resources {
+mod app {
+    use crate::FlashWrapper;
+    use cortex_m::{asm::*, interrupt};
+    use embedded_hal::digital::v2::OutputPin;
+    use itm_logger::*;
+    use stm32f1xx_hal::{
+        pac::{FLASH, TIM2},
+        prelude::*,
+        time::Hertz,
+        timer::counter::Counter,
+        timer::{Event, Timer},
+        usb::{Peripheral, UsbBus, UsbBusType},
+    };
+    use usb_bootloader::{flash::Flash, ghost_fat::GhostFat, hardware_extra::*};
+    use usb_device::{
+        bus,
+        device::{UsbDevice, UsbDeviceBuilder, UsbVidPid},
+    };
+    use usbd_mass_storage::USB_CLASS_MSC;
+    use usbd_scsi::{BlockDevice, BlockDeviceError, Scsi};
+    use usbd_serial::{CdcAcmClass, SerialPort, USB_CLASS_CDC};
+    const TICK_MS: u32 = 10;
+    const TICK_HZ: u32 = 1000 / TICK_MS;
+
+    // VID and PID are from dapboot bluepill bootloader
+    const USB_VID: u16 = 0x1209;
+    const USB_PID: u16 = 0xDB42;
+    //const USB_CLASS_MISCELLANEOUS: u8 =  0xEF;
+
+    #[shared]
+    struct Shared {
         usb_dev: UsbDevice<'static, UsbBusType>,
         scsi: Scsi<'static, UsbBusType, GhostFat<FlashWrapper>>,
-        tick_timer: CountDownTimer<TIM2>,
+        tick_timer: Counter<TIM2, TICK_HZ>,
     }
 
+    #[local]
+    struct Local {}
+
     #[init]
-    fn init(mut cx: init::Context) -> init::LateResources {
+    fn init(mut cx: init::Context) -> (Shared, Local, init::Monotonics) {
         static mut USB_BUS: Option<bus::UsbBusAllocator<UsbBusType>> = None;
 
         // If caches are enabled, write operations to flash cause the core to hang because it
@@ -348,14 +327,14 @@ const APP: () = {
         // This can be proved by counting busy loops on the SR.BSY flag. With caches enabled this will
         // almost always get < 2 cycles. With caches disabled it's a much more relistic figure of
         // 350 cycles for a write and 150k cycles for a page erase.
-        // However, since we're just busy looping while writing it doesn't really matter. Might be 
+        // However, since we're just busy looping while writing it doesn't really matter. Might be
         // worth disabling them if there was any useful work to be done in this time but for now,
-        // leave them enabled. 
+        // leave them enabled.
         //cx.core.SCB.disable_icache();
         //cx.core.SCB.disable_dcache(&mut cx.core.CPUID);
 
         #[cfg(feature = "itm")]
-        {        
+        {
             update_tpiu_baudrate(8_000_000, ITM_BAUD_RATE).expect("Failed to reset TPIU baudrate");
             logger_init();
         }
@@ -364,11 +343,7 @@ const APP: () = {
 
         let mut flash = cx.device.FLASH.constrain();
         let mut rcc = cx.device.RCC.constrain();
-        let bkp = rcc.bkp.constrain(
-            cx.device.BKP, 
-            &mut rcc.apb1,
-            &mut cx.device.PWR,
-        );
+        let bkp = rcc.bkp.constrain(cx.device.BKP, &mut cx.device.PWR);
         let tim2 = cx.device.TIM2;
 
         let clocks = rcc
@@ -391,13 +366,9 @@ const APP: () = {
 
         // This may not be 100% accurate. Cube hal has some random IFDEFs that don't even appear
         // to align with the core density.
-        let page_size = if flash_kib > 128 {
-            2048 
-        } else {
-            1024
-        };
+        let page_size = if flash_kib > 128 { 2048 } else { 1024 };
 
-        let flash_wrapper = FlashWrapper { 
+        let flash_wrapper = FlashWrapper {
             page_size,
             page_buffer: [0; 2048],
             current_page: None,
@@ -406,8 +377,7 @@ const APP: () = {
         };
         info!("Flash MAX: 0x{:X?}", flash_wrapper.max_address);
 
-
-        let mut gpioa = cx.device.GPIOA.split(&mut rcc.apb2);
+        let mut gpioa = cx.device.GPIOA.split();
 
         // BluePill board has a pull-up resistor on the D+ line.
         // Pull the D+ pin down to send a RESET condition to the USB bus.
@@ -426,83 +396,78 @@ const APP: () = {
             pin_dp: usb_dp,
         };
 
-        *USB_BUS = Some(UsbBus::new(usb));
+        unsafe {
+            *USB_BUS = Some(UsbBus::new(usb));
+        }
 
-        let mut tick_timer = Timer::tim2(tim2, &clocks, &mut rcc.apb1)
-            .start_count_down(TICK_HZ);
+        let mut tick_timer = Timer::tim2(tim2, &clocks, &mut rcc.apb1).start_count_down(TICK_HZ);
         tick_timer.listen(Event::Update);
 
-        let ghost_fat = GhostFat::new(
-            flash_wrapper,
-            bkp,
-        );
+        let ghost_fat = GhostFat::new(flash_wrapper, bkp);
 
         let scsi = Scsi::new(
-            USB_BUS.as_ref().unwrap(), 
+            unsafe { USB_BUS.as_ref().unwrap() },
             64,
             ghost_fat,
             "Fake Co.",
             "Fake product",
             "FK01",
         );
-        
+
         let serial_number = get_serial_number();
         info!("Serial number: {}", serial_number);
 
-        let usb_dev = UsbDeviceBuilder::new(USB_BUS.as_ref().unwrap(), UsbVidPid(USB_VID, USB_PID))
-            .manufacturer("Fake company")
-            .product("Serial port")
-            .serial_number(serial_number)
-            .self_powered(true)
-            .device_class(USB_CLASS_MSC)
-            .build();
+        let usb_dev = UsbDeviceBuilder::new(
+            unsafe { USB_BUS.as_ref().unwrap() },
+            UsbVidPid(USB_VID, USB_PID),
+        )
+        .manufacturer("Fake company")
+        .product("Serial port")
+        .serial_number(serial_number)
+        .self_powered(true)
+        .device_class(USB_CLASS_MSC)
+        .build();
 
-        init::LateResources { 
-            usb_dev, 
-            scsi, 
-            tick_timer,
+        (
+            Shared {
+                usb_dev,
+                scsi,
+                tick_timer,
+            },
+            Local {},
+            init::Monotonics(),
+        )
+    }
+
+    fn usb_poll<B: bus::UsbBus>(
+        usb_dev: &mut UsbDevice<'static, B>,
+        scsi: &mut Scsi<'static, B, GhostFat<FlashWrapper>>,
+    ) {
+        if !usb_dev.poll(&mut [scsi]) {
+            return;
         }
     }
 
-    #[task(binds = USB_HP_CAN_TX, resources = [usb_dev, scsi])]
+    #[task(binds = USB_HP_CAN_TX, shared = [usb_dev, scsi])]
     fn usb_tx(mut cx: usb_tx::Context) {
         usb_poll(&mut cx.resources.usb_dev, &mut cx.resources.scsi);
     }
 
-    #[task(binds = USB_LP_CAN_RX0, resources = [usb_dev, scsi])]
+    #[task(binds = USB_LP_CAN_RX0, shared = [usb_dev, scsi])]
     fn usb_rx0(mut cx: usb_rx0::Context) {
         usb_poll(&mut cx.resources.usb_dev, &mut cx.resources.scsi);
     }
 
-    #[task(binds = TIM2, resources = [scsi, tick_timer])]
+    #[task(binds = TIM2, shared = [scsi, tick_timer])]
     fn tick(cx: tick::Context) {
-        cx.resources
-          .tick_timer
-          .clear_update_interrupt_flag();
+        cx.resources.tick_timer.clear_update_interrupt_flag();
 
-        cx.resources
-          .scsi
-          .block_device_mut()
-          .tick(TICK_MS);
-
-    }
-};
-
-fn usb_poll<B: bus::UsbBus>(
-    usb_dev: &mut UsbDevice<'static, B>,
-    scsi: &mut Scsi<'static, B, GhostFat<FlashWrapper>>,
-) {
-    if !usb_dev.poll(&mut [scsi]) {
-        return;
+        cx.resources.scsi.block_device_mut().tick(TICK_MS);
     }
 }
 
-
 #[panic_handler]
-fn panic(
-    #[cfg_attr(not(feature = "itm"), allow(unused_variables))]
-    info: &PanicInfo
-) -> ! {
+fn panic(#[cfg_attr(not(feature = "itm"), allow(unused_variables))] info: &PanicInfo) -> ! {
     interrupt::disable();
 
     #[cfg(feature = "itm")]

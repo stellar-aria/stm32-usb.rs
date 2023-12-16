@@ -1,47 +1,51 @@
 #![no_std]
 #![no_main]
 
-#[allow(unused_imports)]
-use cortex_m::{asm, singleton};
-
 use core::{
     panic::PanicInfo,
     sync::atomic::{self, Ordering},
 };
 use cortex_m::interrupt;
+use stm32f1xx_hal::gpio::gpioc::*;
 
-use stm32f1xx_hal::{
-    prelude::*,
-    gpio::{
-        Output,
-        PushPull,
-        gpioc::*,
-    },    
-};
+#[rtic::app(device = stm32f1xx_hal::stm32, peripherals = true)]
+mod app {
+    use cortex_m::{asm, singleton};
 
-use embedded_hal::digital::v2::OutputPin;
+    use embedded_hal::digital::v2::OutputPin;
+    use stm32f1xx_hal::{
+        gpio::{Output, PushPull, PC13},
+        prelude::*,
+    };
 
-#[rtfm::app(device = stm32f1xx_hal::stm32, peripherals = true)]
-const APP: () = {
-    struct Resources {
+    #[shared]
+    struct Shared {}
+
+    #[local]
+    struct Local {
         led_usr: PC13<Output<PushPull>>,
     }
-    
+
     #[init]
-    fn init(cx: init::Context) -> init::LateResources {
+    fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         asm::bkpt();
         let device = cx.device;
-        let mut rcc = device.RCC.constrain();
-        let mut gpioc = device.GPIOC.split(&mut rcc.apb2);
+        let mut gpioc = device.GPIOC.split();
 
         let mut led_usr = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
-        
+
         loop {
             let _ = led_usr.set_high();
-            for _ in 0..100000 { asm::nop() }
+            for _ in 0..100000 {
+                asm::nop()
+            }
             let _ = led_usr.set_low();
-            for _ in 0..100000 { asm::nop() }
+            for _ in 0..100000 {
+                asm::nop()
+            }
         }
+
+        (Shared {}, Local { led_usr }, init::Monotonics())
     }
 
     #[idle]
@@ -50,7 +54,7 @@ const APP: () = {
             asm::wfi();
         }
     }
-};
+}
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
